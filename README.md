@@ -1,6 +1,6 @@
 # Open Chess
 
-A small, shareable two player chess game built with React, TypeScript, chess.js, Cloudflare Workers, and Durable Objects. The Worker validates every move; a Durable Object owns each room's WebSocket connections and persists the game position.
+A shareable chess game built with React, TypeScript, chess.js, Cloudflare Workers, and Durable Objects. Play a friend in a private room or challenge the built-in AI at Easy, Medium, or Hard. The Worker validates every move; a Durable Object owns each room's WebSocket connections and persists the game position and selected AI difficulty.
 
 ## Run locally
 
@@ -26,8 +26,10 @@ Wrangler creates the `open-chess` Worker and its SQLite-backed Durable Object cl
 ## Current game flow
 
 - Create a room and share its link, or join using its room code.
+- Choose Chess AI and a difficulty to play solo as White against the AI as Black.
 - The first two connected players take White and Black; additional connections can watch.
 - The server checks turn order and legal moves. Pawn promotion currently defaults to a queen.
+- The AI searches one, two, or three plies at Easy, Medium, or Hard, with a material and positional evaluation.
 - Positions and game results survive Durable Object hibernation. Refreshing creates a new player connection; rooms currently have no accounts or durable player identity.
 
 ## Next useful additions

@@ -8,11 +8,14 @@ interface Env {
 
 type PlayerColor = 'w' | 'b';
 type ClientMessage =
-  | { type: 'join'; name?: string }
+  | { type: 'join'; name?: string; mode?: 'friend' | 'ai'; difficulty?: 'easy' | 'medium' | 'hard' }
   | { type: 'move'; from: string; to: string; promotion?: string }
+  | { type: 'ai_move'; from: string; to: string; promotion?: string }
   | { type: 'resign' };
 
-type StoredGame = { fen: string; pgn: string; result: string | null };
+type GameMode = 'friend' | 'ai';
+type AiDifficulty = 'easy' | 'medium' | 'hard';
+type StoredGame = { fen: string; pgn: string; result: string | null; mode?: GameMode; difficulty?: AiDifficulty };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -30,6 +33,9 @@ export default {
 export class GameRoom extends DurableObject<Env> {
   private chess: Chess;
   private gameResult: string | null = null;
+  private gameMode: GameMode = 'friend';
+  private aiDifficulty: AiDifficulty = 'medium';
+  private configured = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -57,40 +63,53 @@ export class GameRoom extends DurableObject<Env> {
 
     const attachment = (socket.deserializeAttachment() || { color: null, name: 'Guest' }) as { color: PlayerColor | null; name: string };
     if (message.type === 'join') {
+      if (!this.configured) {
+        this.gameMode = message.mode === 'ai' ? 'ai' : 'friend';
+        this.aiDifficulty = message.difficulty === 'easy' || message.difficulty === 'hard' ? message.difficulty : 'medium';
+        this.configured = true;
+        await this.save();
+      }
       const assigned = this.assignColor(socket);
       const name = typeof message.name === 'string' ? message.name.trim().slice(0, 20) : '';
       socket.serializeAttachment({ color: assigned, name: name || 'Player' });
-      this.broadcast({ type: 'state', fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result(), players: this.players() });
-      this.send(socket, { type: 'joined', color: assigned, fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result() });
+      this.broadcast(this.stateMessage());
+      this.send(socket, { ...this.stateMessage(), type: 'joined', color: assigned });
       return;
     }
 
-    if (message.type === 'move') {
+    if (message.type === 'move' || message.type === 'ai_move') {
       if (!attachment.color) { this.send(socket, { type: 'error', message: 'Join the game first.' }); return; }
-      if (attachment.color !== this.chess.turn()) { this.send(socket, { type: 'error', message: 'It is not your turn.' }); return; }
+      if (message.type === 'ai_move') {
+        if (this.gameMode !== 'ai' || attachment.color !== 'w' || this.chess.turn() !== 'b') {
+          this.send(socket, { type: 'error', message: 'That is not an AI turn.' }); return;
+        }
+      } else if (attachment.color !== this.chess.turn()) {
+        this.send(socket, { type: 'error', message: 'It is not your turn.' }); return;
+      }
       try {
         this.chess.move({ from: message.from, to: message.to, promotion: message.promotion || 'q' });
       } catch { this.send(socket, { type: 'error', message: 'That move is not legal.' }); return; }
       await this.save();
-      this.broadcast({ type: 'state', fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result(), players: this.players() });
+      this.broadcast(this.stateMessage());
       return;
     }
 
     if (message.type === 'resign' && attachment.color) {
       this.gameResult = attachment.color === 'w' ? '0-1' : '1-0';
       await this.save();
-      this.broadcast({ type: 'state', fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result(), players: this.players() });
+      this.broadcast(this.stateMessage());
     }
   }
 
   async webSocketClose(socket: WebSocket): Promise<void> {
     await this.restore();
     try { socket.close(); } catch { /* already closed */ }
-    this.broadcast({ type: 'state', fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result(), players: this.players() });
+    this.broadcast(this.stateMessage());
   }
 
   private assignColor(socket: WebSocket): PlayerColor | null {
     const occupied = new Set(this.ctx.getWebSockets().filter(ws => ws !== socket).map(ws => (ws.deserializeAttachment() as { color?: PlayerColor } | null)?.color));
+    if (this.gameMode === 'ai') return occupied.has('w') ? null : 'w';
     if (!occupied.has('w')) return 'w';
     if (!occupied.has('b')) return 'b';
     return null;
@@ -112,15 +131,22 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   private async save(): Promise<void> {
-    await this.ctx.storage.put<StoredGame>('game', { fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result() });
+    await this.ctx.storage.put<StoredGame>('game', { fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result(), mode: this.gameMode, difficulty: this.aiDifficulty });
   }
 
   private async restore(): Promise<void> {
     const stored = await this.ctx.storage.get<StoredGame>('game');
     if (!stored) return;
     this.gameResult = stored.result;
+    this.gameMode = stored.mode === 'ai' ? 'ai' : 'friend';
+    this.aiDifficulty = stored.difficulty === 'easy' || stored.difficulty === 'hard' ? stored.difficulty : 'medium';
+    this.configured = stored.mode !== undefined;
     try { this.chess.loadPgn(stored.pgn); }
     catch { this.chess = new Chess(stored.fen); }
+  }
+
+  private stateMessage() {
+    return { type: 'state', fen: this.chess.fen(), pgn: this.chess.pgn(), result: this.result(), players: this.players(), mode: this.gameMode, difficulty: this.aiDifficulty };
   }
 
   private send(socket: WebSocket, data: unknown): void {

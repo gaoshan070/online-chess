@@ -33,4 +33,3 @@ Wrangler creates the `open-chess` Worker and its SQLite-backed Durable Object cl
 ## Next useful additions
 
 Player reconnection identity, chess clocks, promotion selection, draw offers, PGN export, room expiry, rate limits, and automated game rules coverage.
-
